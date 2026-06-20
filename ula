@@ -1,0 +1,10 @@
+# 10. 简易计算器（支持 + - * /）
+def calculator(expression):
+    import operator
+    ops = {"+": operator.add, "-": operator.sub,
+           "*": operator.mul, "/": operator.truediv}
+    a, op, b = expression.split()
+    return ops[op](float(a), float(b))
+
+print(calculator("12 * 3"))   # 36.0
+print(calculator("10 / 4"))   # 2.5
