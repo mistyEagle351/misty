@@ -1,0 +1,113 @@
+use std::sync::{Arc, Mutex, Condvar};
+use std::thread;
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
+
+type Job = Box<dyn FnOnce() + Send + 'static>;
+
+struct WorkerPool {
+    workers: Vec<thread::JoinHandle<()>>,
+    sender: Arc<(Mutex<Option<VecDeque<Job>>>, Condvar)>,
+}
+
+impl WorkerPool {
+    fn new(size: usize) -> Self {
+        let queue: Arc<(Mutex<Option<VecDeque<Job>>>, Condvar)> =
+            Arc::new((Mutex::new(Some(VecDeque::new())), Condvar::new()));
+        let mut workers = Vec::with_capacity(size);
+        for id in 0..size {
+            let q = Arc::clone(&queue);
+            let handle = thread::spawn(move || {
+                println!("[Worker {}] started", id);
+                loop {
+                    let job = {
+                        let (lock, cvar) = &*q;
+                        let mut guard = lock.lock().unwrap();
+                        loop {
+                            match guard.as_mut() {
+                                None => {
+                                    println!("[Worker {}] shutting down", id);
+                                    return;
+                                }
+                                Some(q) if !q.is_empty() => break,
+                                _ => {
+                                    guard = cvar.wait(guard).unwrap();
+                                }
+                            }
+                        }
+                        guard.as_mut().unwrap().pop_front()
+                    };
+                    if let Some(job) = job {
+                        job();
+                    }
+                }
+            });
+            workers.push(handle);
+        }
+        WorkerPool { workers, sender: queue }
+    }
+
+    fn submit<F>(&self, f: F)
+    where F: FnOnce() + Send + 'static {
+        let (lock, cvar) = &*self.sender;
+        let mut guard = lock.lock().unwrap();
+        if let Some(q) = guard.as_mut() {
+            q.push_back(Box::new(f));
+            cvar.notify_one();
+        }
+    }
+
+    fn shutdown(self) {
+        {
+            let (lock, cvar) = &*self.sender;
+            let mut guard = lock.lock().unwrap();
+            *guard = None;
+            cvar.notify_all();
+        }
+        for worker in self.workers {
+            worker.join().unwrap();
+        }
+        println!("All workers shut down");
+    }
+}
+
+fn fibonacci(n: u64) -> u64 {
+    match n {
+        0 => 0,
+        1 => 1,
+        _ => {
+            let (mut a, mut b) = (0u64, 1u64);
+            for _ in 2..=n {
+                let c = a.wrapping_add(b);
+                a = b;
+                b = c;
+            }
+            b
+        }
+    }
+}
+
+fn main() {
+    let pool = WorkerPool::new(4);
+    let results = Arc::new(Mutex::new(vec![0u64; 20]));
+    let start = Instant::now();
+
+    for i in 0..20usize {
+        let results = Arc::clone(&results);
+        pool.submit(move || {
+            let val = fibonacci(i as u64 * 5);
+            let mut r = results.lock().unwrap();
+            r[i] = val;
+            println!("[Task {:>2}] fib({:>2}) = {}", i, i * 5, val);
+            thread::sleep(Duration::from_millis(50));
+        });
+    }
+
+    thread::sleep(Duration::from_secs(3));
+    pool.shutdown();
+
+    let elapsed = start.elapsed();
+    let r = results.lock().unwrap();
+    println!("Results: {:?}", &r[..]);
+    println!("Total time: {:.2?}", elapsed);
+}
